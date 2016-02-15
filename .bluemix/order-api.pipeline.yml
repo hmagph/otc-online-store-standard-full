@@ -5,13 +5,12 @@ stages:
   - type: git
     branch: master
     url: ${GIT_REPO_URL}
-    token: ${GIT_REPO_TOKEN}	
+    token: ${GIT_REPO_TOKEN}
   triggers:
   - type: commit
   jobs:
   - name: Build
     type: builder
-    artifact_dir: ''
 - name: DEV
   inputs:
   - type: job
@@ -27,22 +26,32 @@ stages:
     value: undefined
     type: text
   jobs:
-  - name: Deploy to dev
+  - name: Pre Deploy Check
+    type: tester
+    extension_id: ibm.devops.services.pipeline.dra_predeploygate_extn
+    ENABLE_COMPARE_APPS: 'false'
+    DRA_MODE: 'false'
+    APP_DESTINATION_MANIFEST: manifest.yml
+    APP_DESTINATION: Dev
+    APP_NOTDESTINATION: Test
+    COMMAND: '#!/bin/bash'
+  - name: Deploy to Dev
     type: deployer
     target:
       region_id: ${DEV_REGION_ID}
       organization: ${DEV_ORG_NAME}
       space: ${DEV_SPACE_NAME}
       application: ${CF_APP_NAME}
-    script: |-
+    script: |
       #!/bin/bash
       cf create-service sqldb sqldb_free myMicroservicesSQL
       # Push app
       export CF_APP_NAME="dev-$CF_APP"
       cf push "${CF_APP_NAME}"
+      #export APP_URL=http://$(cf app $CF_APP_NAME | grep urls: | awk '{print $2}')
       # View logs
       #cf logs "${CF_APP_NAME}" --recent
-- name: QA
+- name: TEST
   inputs:
   - type: job
     stage: BUILD
@@ -57,14 +66,23 @@ stages:
     value: undefined
     type: text
   jobs:
-  - name: Deploy to QA
+  - name: Pre Deploy Check
+    type: tester
+    extension_id: ibm.devops.services.pipeline.dra_predeploygate_extn
+    ENABLE_COMPARE_APPS: 'true'
+    DRA_MODE: 'false'
+    APP_DESTINATION_MANIFEST: manifest.yml
+    APP_DESTINATION: Test
+    APP_NOTDESTINATION: Dev
+    COMMAND: '#!/bin/bash'
+  - name: Deploy to Test
     type: deployer
     target:
       region_id: ${QA_REGION_ID}
       organization: ${QA_ORG_NAME}
       space: ${QA_SPACE_NAME}
       application: ${CF_APP_NAME}
-    script: |-
+    script: |
       #!/bin/bash
       cf create-service sqldb sqldb_free myMicroservicesSQL
       # Push app
@@ -72,7 +90,7 @@ stages:
       cf push "${CF_APP_NAME}"
       # View logs
       #cf logs "${CF_APP_NAME}" --recent
-  - name: Sauce Labs Tests QA
+  - name: Sauce Labs Tests
     type: tester
     extension_id: ibm.devops.services.pipeline.saucelabs
     target:
@@ -108,8 +126,29 @@ stages:
   - name: APP_URL
     value: undefined
     type: text
+  - name: AD_ENDPOINT
+    value: http://cap-sg-prd-1.integration.ibmcloud.com:15749
+    type: text
+  - name: GROUP_SIZE
+    value: '2'
+    type: text
+  - name: TARGET_PLATFORM
+    value: CloudFoundry
+    type: text
+  - name: TEST_RESULT_FOR_AD
+    value: ''
+    type: text
   jobs:
-  - name: Deploy to prod
+  - name: Pre Deploy Check
+    type: tester
+    extension_id: ibm.devops.services.pipeline.dra_predeploygate_extn
+    ENABLE_COMPARE_APPS: 'true'
+    DRA_MODE: 'false'
+    APP_DESTINATION_MANIFEST: manifest.yml
+    APP_DESTINATION: Prod
+    APP_NOTDESTINATION: Test
+    COMMAND: '#!/bin/bash'
+  - name: Passive Deploy
     type: deployer
     target:
       region_id: ${PROD_REGION_ID}
@@ -119,8 +158,33 @@ stages:
     script: |-
       #!/bin/bash
       cf create-service sqldb sqldb_free myMicroservicesSQL
-      # Push app
-      export CF_APP_NAME="$CF_APP"
-      cf push "${CF_APP_NAME}"
-      # View logs
-      #cf logs "${CF_APP_NAME}" --recent
+      export CF_APP_NAME="${CF_APP}_${BUILD_NUMBER}"
+      cf push "${CF_APP_NAME}" --no-route -i 1
+  - name: Active Rollout
+    type: deployer
+    extension_id: ibm.devops.services.pipeline.devops.ad_start
+    target:
+      region_id: ${PROD_REGION_ID}
+      organization: ${PROD_ORG_NAME}
+      space: ${PROD_SPACE_NAME}
+      application: ${CF_APP_NAME}
+    RAMPDOWN_DURATION: 1m
+    RAMPUP_DURATION: 2m
+    COMMAND: |-
+      #!/bin/bash
+      source ${EXT_DIR}/git_util.sh
+      git_retry clone https://github.com/Osthanes/update_service.git activedeploy
+      activedeploy/activedeploy_step_1.sh
+  - name: Active Cleanup
+    type: deployer
+    extension_id: ibm.devops.services.pipeline.devops.ad_finish
+    target:
+      region_id: ${PROD_REGION_ID}
+      organization: ${PROD_ORG_NAME}
+      space: ${PROD_SPACE_NAME}
+      application: ${CF_APP_NAME}
+    COMMAND: |-
+      #!/bin/bash
+      source ${EXT_DIR}/git_util.sh
+      git_retry clone https://github.com/Osthanes/update_service.git activedeploy
+      activedeploy/activedeploy_step_2.sh
